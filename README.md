@@ -252,7 +252,7 @@ Il faut distinguer deux approches.
 
 ### Approche 1 : installation guidée et automatisée progressivement
 
-Je suit le guide officiel et j'automatise chaque étape avec mes propres playbooks Ansible afin de comprendre les dépendances et les paramètres de chaque service.
+Je suis le guide officiel et j'automatise chaque étape avec mes propres playbooks Ansible afin de comprendre les dépendances et les paramètres de chaque service.
 
 ### Approche 2 : OpenStack-Ansible
 
@@ -272,7 +272,7 @@ L’installation guidée est pertinente pour comprendre les mécanismes sous-jac
 
 ## 7. Intérêt du lab
 
-Ce lab permet de travailler plusieurs compétences utiles.
+Ce lab me permet de travailler plusieurs compétences utiles.
 
 ### 7.1 Automatisation et Infrastructure as Code
 
