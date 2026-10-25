@@ -1,445 +1,395 @@
-# TP1 – Installation manuelle d'OpenStack 2026.1 (Gazpacho)
+# Readme
 
-Déploiement « à la main » d'OpenStack 2026.1 en suivant le **guide d'installation officiel**,
-automatisé étape par étape avec **Vagrant + VirtualBox + Ansible (ansible_local)**.
+## Objectif du lab
 
-Le sujet du TP (PDF) visait OpenStack Wallaby : ce dépôt applique les **mêmes étapes**
-avec la release actuelle, **2026.1 Gazpacho** (release SLURP), sur **Ubuntu 24.04 LTS**
-via l'Ubuntu Cloud Archive.
+Ce lab consiste à déployer une infrastructure cloud OpenStack en suivant la documentation officielle, tout en automatisant les différentes étapes avec **Vagrant, VirtualBox et Ansible (`ansible_local`)**.
 
-Services déployés : Keystone, Glance, Placement, Nova, Neutron (option 2 : réseaux
-self-service, Open vSwitch + VXLAN), Horizon, Cinder (LVM + iSCSI).
+L’objectif est de comprendre le fonctionnement interne d’OpenStack plutôt que de déléguer l’installation complète à un outil de déploiement intégré.
 
----
+Pour un parcours en infrastructure, cloud et DevSecOps, cet exercice permet d’étudier les composants d’un cloud privé, leurs dépendances, leur configuration et les mécanismes nécessaires à leur sécurisation.
 
-## 1. Architecture
-
-| Nœud | IP management | IP provider | vCPU / RAM | Rôle |
-|---|---|---|---|---|
-| `controller` | 192.168.56.11 | eth2 (sans IP) | 4 / 10 Go | MariaDB, RabbitMQ, memcached, etcd, toutes les API, agents Neutron L3/DHCP/metadata/OVS, Horizon, cinder-api/scheduler |
-| `compute1` | 192.168.56.31 | eth2 (sans IP) | 4 / 8 Go | nova-compute (KVM, virtualisation imbriquée), agent OVS |
-| `block1` | 192.168.56.41 | – | 2 / 2 Go | cinder-volume, LVM (`cinder-volumes` sur un disque dédié de 20 Go), tgt (iSCSI) |
-
-Réseaux VirtualBox :
-
-| Interface | Type | Réseau | Usage |
-|---|---|---|---|
-| eth0 | NAT (Vagrant) | 10.0.2.0/24 | Internet, SSH Vagrant |
-| eth1 | host-only | 192.168.56.0/24 | **management** (trafic entre services, tunnels VXLAN, iSCSI) |
-| eth2 | host-only, promiscuous `allow-all` | 192.168.57.0/24 | **provider** : interface sans IP, branchée sur le bridge OVS `br-provider` |
-
-Réseaux OpenStack créés pendant le TP :
-
-- `provider` : réseau flat externe sur 192.168.57.0/24 (IP flottantes) ;
-- `selfservice` : réseau VXLAN projet 172.16.1.0/24, routé vers `provider` par le routeur `router`.
+Documentation officielle : [OpenStack 2026.1](https://docs.openstack.org/2026.1/).
 
 ---
 
-## 2. Prérequis sur le poste Windows
+## 1. Comprendre les éléments du lab
 
-- VirtualBox et Vagrant (testé avec **Vagrant 2.4.9**), environ 20 Go de RAM libres.
-- La box `bento/ubuntu-24.04` (amd64).
-- **L'hyperviseur Windows désactivé pendant le TP** (voir §2.1).
-- Une variable d'environnement contenant le mot de passe Ansible Vault, dans la session PowerShell :
+### 1.1 OpenStack 2026.1 (Gazpacho)
 
-  ```powershell
-  $env:TP_OS_VAULT_PASS = Read-Host "Mot de passe Vault"
-  ```
+OpenStack est une plateforme open source permettant de construire et d’exploiter un cloud privé ou public.
 
-  Le Vagrantfile la lit et la dépose dans `/etc/ansible-vault-pass.txt` (mode 0640, root:vagrant),
-  **en dehors** du dossier synchronisé `/vagrant`. Sans cette variable, le provisioner
-  `vault-pass` s'arrête en erreur.
+Elle permet notamment de :
 
-### Poste hôte utilisé
+- Créer des machines virtuelles à la demande.
+- Gérer des réseaux virtuels et des adresses IP.
+- Créer et attacher des volumes de stockage.
+- Gérer les utilisateurs, les projets et les autorisations.
+- Exposer des API pour automatiser les opérations du cloud.
 
-| Mémoire | Processeur |
+Par exemple, une entreprise peut utiliser OpenStack pour permettre à ses équipes de créer leurs propres machines virtuelles sans devoir demander manuellement à un administrateur de leur installer un serveur.
+
+### 1.2 Installation hyrbide (manuelle + automatiser)
+
+L’installation suit le guide officiel et que les services sont configurés progressivement, au lieu de confier tout le déploiement à une solution qui automatise l’ensemble.
+
+Pour installer le service d’identité Keystone, les étapes peuvent comprendre :
+
+1. Installer les paquets requis.
+2. Configurer la base de données.
+3. Créer la base de données et les permissions associées.
+4. Configurer le service Keystone.
+5. Initialiser sa base de données.
+6. Démarrer et activer le service.
+7. Vérifier son fonctionnement.
+
+Une installation "hybride" ne signifie pas nécessairement qu’il faut taper chaque commande soi-même : Ansible permet automatiser les étapes, tout en conservant une organisation qui permet de comprendre chacune d’elles.
+
+**Intérêt pédagogique :** comprendre ce que chaque commande configure, pourquoi elle est nécessaire et quelles dépendances existent entre les services.
+
+---
+
+## 2. À quoi servent Vagrant, VirtualBox et Ansible ?
+
+Ces trois outils ont des rôles différents et complémentaires.
+
+### 2.1 Vagrant : créer et gérer l’environnement de laboratoire
+
+Vagrant automatise la création et la configuration initiale des machines virtuelles.
+
+Les caractéristiques des machines peuvent être décrites dans un fichier `Vagrantfile`. On peut notamment y définir :
+
+- Une machine virtuelle `controller`, `compute1`, `bloc1`.
+- Le système d’exploitation de chaque machine.
+- La mémoire vive et le nombre de processeurs virtuels.
+- Les interfaces réseau.
+- Les opérations de provisionnement à exécuter.
+
+Commandes utiles :
+
+```powershell
+vagrant up
+```
+
+Démarre les machines décrites dans le `Vagrantfile` et crée celles qui n’existent pas encore, si nécessaire.
+
+```powershell
+vagrant status
+```
+
+Affiche l’état des machines gérées par Vagrant.
+
+**Vagrant ne déploie pas OpenStack à lui seul.** Il prépare et gère les machines (ou noeuds/nodes) sur lesquelles OpenStack sera installé.
+
+### 2.2 VirtualBox : fournir la virtualisation
+
+VirtualBox est l’hyperviseur du laboratoire. Il permet de faire fonctionner plusieurs systèmes Linux isolés sur un ordinateur Windows.
+
+Architecture simplifiée :
+
+```text
+Ordinateur physique
+└── Windows 11
+    └── VirtualBox
+        ├── VM controller
+        │   └── Services de contrôle OpenStack
+        │
+        |── VM compute1
+        |    └── Services de calcul OpenStack
+        │
+        └── VM block1
+            └── Services de stockage bloc OpenStack
+
+```
+
+Chaque machine virtuelle possède son propre système d’exploitation, ses processus, ses interfaces réseau et ses ressources allouées.
+
+Il faut distinguer deux niveaux de virtualisation :
+
+- **VirtualBox** exécute les machines virtuelles Linux du laboratoire.
+- **OpenStack Nova** gère les instances que l’on crée ensuite dans le cloud.
+
+Dans un laboratoire imbriqué, les instances OpenStack peuvent être exécutées avec QEMU en mode émulation logicielle si la virtualisation matérielle imbriquée n’est pas disponible. Cette solution est plus lente, mais peut suffire pour apprendre les mécanismes fondamentaux d’OpenStack.
+
+### 2.3 Ansible : automatiser l’installation des services
+
+Ansible automatise les opérations qui seraient autrement effectuées manuellement.
+
+Il utilise des fichiers YAML appelés *playbooks* pour décrire les tâches à exécuter sur les machines.
+
+Exemple de playbook :
+
+```yaml
+- name: Installer RabbitMQ
+  ansible.builtin.apt:
+    name: rabbitmq-server
+    state: present
+
+- name: S'assurer que RabbitMQ est démarré et activé
+  ansible.builtin.service:
+    name: rabbitmq-server
+    state: started
+    enabled: true
+```
+
+Cet exemple installe les paquets indiqués sur une machine Debian ou Ubuntu. Il ne constitue pas, à lui seul, une installation complète d’OpenStack : d’autres tâches sont nécessaires pour configurer les services, leurs bases de données, leurs fichiers de configuration et leur démarrage.
+
+---
+
+## 3. Que signifie `ansible_local` ?
+
+Ansible peut être exécuté de plusieurs façons.
+
+### 3.1 Mode classique : depuis une machine de contrôle
+
+Dans une architecture classique, Ansible est installé sur une machine de contrôle. Celle-ci se connecte aux serveurs Linux via SSH et leur envoie les tâches à exécuter.
+
+```text
+Machine de contrôle
+      │
+      │ SSH
+      ▼
+┌──────────────┐
+│ Serveur Linux│
+└──────────────┘
+```
+
+### 3.2 Mode `ansible_local` : depuis la machine virtuelle
+
+Avec le provisionneur `ansible_local` de Vagrant, Ansible est exécuté **à l’intérieur de la machine virtuelle cible**. Vagrant peut installer Ansible dans cette machine, puis lancer les playbooks depuis celle-ci.
+
+```text
+Ordinateur Windows
+│
+├── Vagrant
+│
+└── VirtualBox
+    │
+    ├── VM controller
+    │   ├── Ansible
+    │   └── Services OpenStack
+    │
+    └── VM compute1
+        ├── Ansible
+        └── Services OpenStack
+```
+
+Cette représentation est indicative : la présence d’Ansible sur chaque VM dépend de la configuration réelle du `Vagrantfile`, dans mon cas j'ai choisi ansible_local (voir les avantages ci-dessous).
+
+Les avantages possibles :
+
+- Ne pas avoir à installer Ansible sur Windows.
+- Exécuter les tâches depuis l’intérieur de la VM.
+- Conserver les playbooks dans le dépôt du projet.
+- Automatiser le provisionnement avec Vagrant.
+
+**`ansible_local` n’est pas un composant d’OpenStack.** C’est une manière d’exécuter les automatisations.
+
+Il ne faut pas non plus le confondre avec **OpenStack-Ansible**, un projet distinct qui fournit une méthode intégrée de déploiement d’OpenStack.
+
+---
+
+## 4. Comment les outils fonctionnent-ils ensemble ?
+
+Prenons un scénario dans lequel les services de contrôle sont installés sur `controller` et les services de calcul sur `compute1`.
+
+| Étape | Outil | Action |
+|---|---|---|
+| 1 | Vagrant | Décrit et crée les machines virtuelles. |
+| 2 | VirtualBox | Exécute les machines virtuelles Linux. |
+| 3 | Vagrant | Configure le provisionnement. |
+| 4 | Ansible | Prépare les systèmes et installe les dépendances. |
+| 5 | Ansible | Configure les bases de données et les services d’infrastructure nécessaires. |
+| 6 | Ansible | Installe et configure les composants OpenStack selon le guide officiel. |
+| 7 | Ansible | Démarre les services et applique les configurations requises. |
+| 8 | Commandes OpenStack | Vérifient que les services fonctionnent correctement. |
+
+Les étapes peuvent être exécutées séparément (et l'ont été dans mon cas) afin de contrôler le résultat avant de poursuivre. Cela facilite le diagnostic.
+
+Par exemple, si Keystone ne démarre pas, le problème peut venir :
+
+- D’une base de données inaccessible.
+- D’un fichier de configuration incorrect.
+- D’un problème de résolution DNS.
+- D’un mot de passe erroné.
+- D’une dépendance manquante.
+- D’un service qui n’a pas démarré.
+
+Le but n’est pas simplement d’obtenir un cloud fonctionnel : **il s’agit de comprendre comment le diagnostiquer et le reconstruire.**
+
+---
+
+## 5. Les principaux composants OpenStack
+
+| Composant | Fonction | Exemple |
+|---|---|---|
+| Keystone | Identité et authentification | Authentifier un utilisateur du cloud. |
+| Glance | Gestion des images | Fournir une image Linux pour créer une VM. |
+| Placement | Inventaire et allocation des ressources | Suivre les ressources disponibles pour les instances. |
+| Nova | Calcul et gestion des instances | Créer et gérer les machines virtuelles. |
+| Neutron | Réseau | Créer des réseaux, sous-réseaux et routeurs virtuels. |
+| Cinder | Stockage en blocs | Attacher un volume persistant à une VM. |
+| Horizon | Interface Web | Administrer le cloud depuis un navigateur. |
+
+Ces services n’ont pas tous le même statut : certains sont fondamentaux pour un déploiement donné, tandis que d’autres sont facultatifs ou dépendent des objectifs.
+
+Horizon peut être ajouté pour disposer d’une interface graphique, mais l’administration d’OpenStack reste possible en ligne de commande. Cinder peut également être introduit ultérieurement si le stockage persistant n’est pas nécessaire aux premières validations.
+
+### 5.1 Le contrôleur le nœud de calcul et le stockage bloc
+
+Dans une architecture simplifiée à trois machines :
+
+- **`controller`** héberge les services de contrôle : authentification, API, planification et autres composants centraux, selon la répartition retenue.
+- **`compute1`** héberge les composants nécessaires à l’exécution des instances, notamment l’agent de calcul Nova et l’hyperviseur utilisé.
+- **`block1`** stocke leurs disques persistants (volumes).
+
+Le contrôleur participe à la décision de placement d’une instance. Le nœud de calcul fournit les ressources nécessaires à son exécution. Le noeud de stockage fourni un volume persistant, si l’instance est supprimé, le volume et ses données restent. On peux alors le rattacher à une autre instance.
+
+---
+
+## 6. Installation guidée ou OpenStack-Ansible ?
+
+Il faut distinguer deux approches.
+
+### Approche 1 : installation guidée et automatisée progressivement
+
+Je suit le guide officiel et j'automatise chaque étape avec mes propres playbooks Ansible afin de comprendre les dépendances et les paramètres de chaque service.
+
+### Approche 2 : OpenStack-Ansible
+
+OpenStack-Ansible est un projet qui fournit une méthode de déploiement et d’exploitation d’OpenStack fondée sur Ansible. Il automatise une grande partie du déploiement selon son architecture, ses rôles et ses procédures.
+
+| Critère | Installation guidée | OpenStack-Ansible |
+|---|---|---|
+| Objectif principal | Apprendre le fonctionnement interne des services | Déployer OpenStack selon une méthode intégrée |
+| Contrôle pédagogique | Très élevé | Élevé, avec une partie de la logique déjà abstraite |
+| Configuration | Importante, service par service | Une grande partie est prise en charge par les rôles existants |
+| Compréhension des dépendances | Étude progressive | Compréhension de l’architecture et du fonctionnement des rôles |
+| Intérêt pour un laboratoire | Excellent pour les fondamentaux | Excellent pour étudier une méthode de déploiement industrialisée |
+
+L’installation guidée est pertinente pour comprendre les mécanismes sous-jacents. Elle ne signifie toutefois pas que l’architecture obtenue est automatiquement adaptée à la production.
+
+---
+
+## 7. Intérêt du lab
+
+Ce lab permet de travailler plusieurs compétences utiles.
+
+### 7.1 Automatisation et Infrastructure as Code
+
+J'apprend à décrire l’infrastructure et sa configuration dans des fichiers versionnés :
+
+- **Vagrant** décrit l’environnement des machines virtuelles.
+- **Ansible** décrit les configurations et les opérations à effectuer.
+- **Git** peut conserver l’historique des changements.
+
+Cela se rapproche des pratiques d’Infrastructure as Code, même si Vagrant et Ansible n’ont pas exactement les mêmes responsabilités que Terraform.
+
+### 7.2 Administration système Linux
+
+Les manipulations couvrent des éléments fondamentaux :
+
+- Paquets et dépendances.
+- Services `systemd`.
+- Permissions et propriétaires.
+- Fichiers de configuration.
+- Réseau et résolution de noms.
+- Journaux et diagnostic.
+
+Ces compétences sont utiles en administration système, en cloud et en Devops/DevSecOps.
+
+### 7.3 Sécurité et durcissement
+
+Une fois le déploiement fonctionnel, le laboratoire peut être enrichi avec des contrôles de sécurité.
+
+| Domaine | Contrôle envisageable |
 |---|---|
-| ![Gestionnaire des tâches : mémoire](docs/captures/02-hote-memoire-64go.png) | ![Gestionnaire des tâches : processeur](docs/captures/03-hote-processeur-vtx.png) |
+| Identités | Vérifier les comptes, rôles et permissions. |
+| Secrets | Éviter de stocker les mots de passe en clair dans Git. |
+| Réseau | Limiter les ports exposés et contrôler les flux entre les nœuds. |
+| Système | Vérifier les permissions des fichiers de configuration. |
+| Services | Vérifier l’état des services et leur configuration. |
+| Journalisation | Contrôler les journaux système et ceux des services OpenStack. |
+| Automatisation | Tester les playbooks, leur idempotence et leurs effets. |
+| Vulnérabilités | Inventorier les paquets et vérifier les mises à jour de sécurité. |
 
-- **Mémoire** : 64 Go de DDR5, avec environ 30 Go déjà occupés hors du lab au moment de la capture.
-  Les 3 VM demandent 20 Go au total (10 + 8 + 2 Go), donc la marge reste confortable.
-- **Processeur** : Intel Core i7-13650HX (14 cœurs, 20 processeurs logiques), avec
-  **Virtualisation : Activé**. VT-x est donc bien activé dans le firmware. C'est une condition
-  nécessaire, mais pas suffisante, pour que VirtualBox l'utilise (voir §2.1).
-
-### 2.1 Hyperviseur Windows (Hyper-V / VBS) : à désactiver, puis à réactiver
-
-Quand l'hyperviseur Windows est actif, VirtualBox fonctionne en mode **NEM** (API Hyper-V).
-Ce mode a été constaté dans `VBox.log` : `HMR3Init: fall back to NEM: VT-x is not available`.
-Les VM sont alors très lentes, et compute1 n'a pas de virtualisation imbriquée, donc pas de KVM.
-
-![Console VirtualBox du controller pendant un démarrage en mode NEM](docs/captures/01-boot-controller-mode-nem.png)
-
-*Démarrage du controller avec l'hyperviseur Windows actif.* Le noyau est encore à l'étape
-`Begin: Loading essential drivers ...` alors que l'horodatage noyau a sauté de ~20 s à
-**1236 s**, avec `clocksource: Long readout interval, skipping watchdog check`. Le démarrage
-dure donc plus de 20 minutes au lieu de quelques secondes, ce qui provoquait les timeouts de
-`vagrant up`. Le symptôme a disparu après la désactivation ci-dessous.
-
-Désactivation temporaire (PowerShell **administrateur**, puis redémarrage) :
-
-```powershell
-bcdedit /export D:\bcd-backup.bcd
-bcdedit /set "{current}" hypervisorlaunchtype off
-```
-
-Après redémarrage, on constate VBS = 0 et VT-x utilisé par VirtualBox, et `/dev/kvm` existe sur compute1.
-
-> **À la fin du TP**, pour retrouver WSL2 / Docker Desktop / VBS :
->
-> ```powershell
-> bcdedit /set "{current}" hypervisorlaunchtype auto
-> ```
->
-> puis redémarrer Windows. La sauvegarde du magasin BCD reste disponible dans `D:\bcd-backup.bcd`.
+Il est également possible d’intégrer des contrôles dans une pipeline CI/CD : validation YAML, analyse statique, détection de secrets et vérification de certaines configurations.
 
 ---
 
-## 3. Arborescence
+## 8. Validation du bon fonctionnement
 
-```
-tp-openstack/
-├── Vagrantfile
-├── README.md
-├── tests-de-validation.md
-├── docs/captures/             # captures d'écran citées dans les deux fichiers .md
-└── ansible/
-    ├── site.yml                    # 5 plays : all, infra controller, services controller, computes, storages
-    ├── group_vars/all/
-    │   ├── main.yml                # variables non sensibles (aucun secret en clair)
-    │   └── vault.yml               # secrets chiffrés (ansible-vault), NON fourni dans le dépôt
-    └── roles/
-        ├── environment             # Cloud Archive gazpacho, dist-upgrade, client OpenStack, chrony
-        ├── mariadb  rabbitmq  memcached  etcd
-        ├── keystone  glance  placement
-        ├── nova_controller  nova_compute
-        ├── neutron_controller  neutron_compute  neutron_ovs
-        ├── horizon
-        └── cinder_controller  cinder_storage  cinder_compute
-```
+L’installation ne doit pas être considérée comme terminée uniquement parce que les playbooks se sont exécutés sans erreur. Des validations fonctionnelles sont nécessaires.
 
-Conventions : un rôle par composant du guide, joués dans l'ordre du guide. Les variables sont
-externalisées dans `group_vars`, les secrets sont préfixés `vault_` dans `vault.yml`, les
-handlers sont dans `handlers/main.yml`, les templates sont en Jinja2 et les options INI sont
-gérées avec `community.general.ini_file`. Les tâches qui manipulent un secret portent `no_log: true`.
+### Niveau 1 — Infrastructure
 
----
+- Les deux VM démarrent.
+- Les interfaces réseau sont correctement configurées.
+- La résolution de noms fonctionne.
+- Les communications nécessaires entre les nœuds sont possibles.
+- Les ressources CPU et RAM sont suffisantes pour le scénario choisi.
 
-## 4. Secrets (Ansible Vault)
+### Niveau 2 — Services OpenStack
 
-`ansible/group_vars/all/vault.yml` contient **15 clés** :
+- Les services nécessaires sont actifs.
+- Les API répondent.
+- Les identifiants et les points de terminaison sont configurés.
+- L’authentification fonctionne.
+- Les journaux ne révèlent pas d’erreur bloquante.
 
-```
-vault_rabbitmq_password       vault_keystone_db_password   vault_admin_password
-vault_demo_password           vault_glance_db_password     vault_glance_password
-vault_placement_db_password   vault_placement_password     vault_nova_db_password
-vault_nova_password           vault_neutron_db_password    vault_neutron_password
-vault_metadata_secret         vault_cinder_db_password     vault_cinder_password
-```
+### Niveau 3 — Fonctionnalités du cloud
 
-Pour créer ou compléter le fichier dans une VM (`vagrant ssh controller`), une commande par ligne :
+Si les composants correspondants ont été installés et configurés, les tests peuvent comprendre :
 
-```bash
-cd /vagrant/ansible/group_vars/all
-umask 077; ansible-vault decrypt vault.yml --vault-password-file /etc/ansible-vault-pass.txt --output /tmp/v.yml
-for k in vault_cinder_db_password vault_cinder_password; do grep -q "^$k:" /tmp/v.yml || echo "$k: \"$(openssl rand -hex 16)\"" >> /tmp/v.yml; done
-ansible-vault encrypt /tmp/v.yml --vault-password-file /etc/ansible-vault-pass.txt --output vault.yml && shred -u /tmp/v.yml
-ansible-vault view vault.yml --vault-password-file /etc/ansible-vault-pass.txt | cut -d: -f1
-```
+1. Authentifier un utilisateur.
+2. Afficher les services OpenStack.
+3. Importer une image Linux.
+4. Créer un réseau virtuel.
+5. Créer une instance.
+6. Vérifier que l’instance démarre.
+7. Tester sa connectivité réseau.
 
-Pour un fichier neuf, il suffit de mettre les 15 noms de clés dans la boucle `for`.
+### Niveau 4 — Reproductibilité
+
+Il est particulièrement utile de vérifier que l’on peut :
+
+- Relancer un playbook sans provoquer de modifications inutiles.
+- Identifier précisément les étapes qui échouent.
+- Reconstruire une VM à partir de la configuration.
+- Documenter les dépendances et les prérequis.
+- Contrôler les changements apportés à l’infrastructure.
+
+Il faut distinguer la reproductibilité d’une machine virtuelle de celle de l’ensemble du cloud : recréer une VM ne signifie pas nécessairement que les données, les identités et tous les services OpenStack seront restaurés automatiquement.
 
 ---
 
-## 5. Déploiement
+## 9. Dimensionnement du laboratoire
 
-Depuis `D:\tp-openstack`, dans une session PowerShell où `TP_OS_VAULT_PASS` est définie.
-**L'ordre compte** : le controller héberge les bases et l'API dont dépendent les autres nœuds.
+Un ordinateur doté de bonne capacité mémoire **64 Go de RAM dans mon cas** constitue une bonne base pour ce type de laboratoire. Plusieurs facteurs doivent néanmoins être pris en compte :
 
-```powershell
-vagrant up controller
-vagrant up compute1
-vagrant up block1
-```
+- La RAM réellement disponible pour les VM.
+- Le nombre de processeurs virtuels alloués.
+- L’espace disque disponible.
+- La compatibilité de VirtualBox avec les mécanismes de virtualisation de Windows.
+- La capacité à faire fonctionner des instances OpenStack à l’intérieur des VM.
 
-Le rôle `environment` fait un `dist-upgrade`. S'il signale `Redémarrage requis sur <nœud>` :
+OpenStack est une plateforme relativement lourde. Il est donc préférable de dimensionner le laboratoire avec soin et de commencer par une installation minimale.
 
-```powershell
-vagrant reload <nœud>
-```
+Si la virtualisation matérielle imbriquée n’est pas disponible, le recours à QEMU en mode émulation logicielle peut permettre certains tests, mais les performances seront nettement inférieures à celles d’un environnement bénéficiant de la virtualisation matérielle.
 
-Pour rejouer Ansible sans recréer les VM (même ordre) :
-
-```powershell
-vagrant provision controller --provision-with ansible
-vagrant provision compute1   --provision-with ansible
-vagrant provision block1     --provision-with ansible
-```
-
-Chaque VM ne se configure qu'elle-même : par défaut, ansible_local limite le playbook à la
-machine courante. Un nouveau passage doit donner `changed=0` sur les trois nœuds (idempotence).
-
-Accès :
-
-- **Horizon** : http://192.168.56.11/horizon (domaine `Default`, utilisateur `admin` ou `myuser`) ;
-- **CLI** : `vagrant ssh controller`, puis `source ~/admin-openrc` ou `source ~/demo-openrc`.
-  Les fichiers sont aussi dans `/root`, en mode 0600.
+Cela ne remet pas en cause l’intérêt pédagogique du lab.
 
 ---
 
-## 6. Étapes manuelles du guide (après le provisioning)
+## Conclusion
 
-Ces opérations correspondent aux pages *Verify* et *Launch an instance* du guide. Elles ont été
-faites à la main en CLI, comme dans le guide, et ne sont pas dans Ansible.
+Ce lab consiste à construire un cloud OpenStack en séparant clairement trois responsabilités :
 
-### 6.1 Image CirrOS (Glance)
+- **Vagrant** : préparer et gérer les machines virtuelles.
+- **VirtualBox** : exécuter les machines virtuelles.
+- **Ansible avec `ansible_local`** : automatiser, depuis les VM, les étapes d’installation et de configuration d’OpenStack.
 
-```bash
-source ~/admin-openrc
-wget http://download.cirros-cloud.net/0.4.0/cirros-0.4.0-x86_64-disk.img
-openstack image create cirros --file cirros-0.4.0-x86_64-disk.img --disk-format qcow2 --container-format bare --public
-```
+Le guide officiel sert de référence pour comprendre chaque service, tandis que l’automatisation rend les opérations plus reproductibles.
 
-### 6.2 Réseaux, gabarit, clé, groupe de sécurité
+Il est utile de conserver une trace de chaque étape : commandes exécutées, fichiers modifiés, dépendances, erreurs rencontrées, tests fonctionnels et contrôles de sécurité.
 
-Les valeurs entre `< >` sont propres à chaque environnement : reporter celles utilisées.
-
-```bash
-source ~/admin-openrc
-openstack network create --share --external --provider-physical-network provider --provider-network-type flat provider
-openstack subnet create --network provider --allocation-pool start=<DEBUT>,end=<FIN> --dns-nameserver <DNS> --gateway <PASSERELLE> --subnet-range 192.168.57.0/24 provider
-openstack flavor create --id 0 --vcpus 1 --ram 64 --disk 1 m1.nano
-
-source ~/demo-openrc
-openstack network create selfservice
-openstack subnet create --network selfservice --dns-nameserver <DNS> --gateway <PASSERELLE_SELFSERVICE> --subnet-range 172.16.1.0/24 selfservice
-openstack router create router
-openstack router add subnet router selfservice
-openstack router set router --external-gateway provider
-ssh-keygen -q -N ""
-openstack keypair create --public-key ~/.ssh/id_rsa.pub mykey
-openstack security group rule create --proto icmp default
-openstack security group rule create --proto tcp --dst-port 22 default
-```
-
-### 6.3 Instance, IP flottante, volume
-
-```bash
-source ~/demo-openrc
-openstack server create --flavor m1.nano --image cirros --nic net-id=<ID_SELFSERVICE> --security-group default --key-name mykey selfservice-instance
-openstack floating ip create provider
-openstack server add floating ip selfservice-instance <IP_FLOTTANTE>
-openstack console url show selfservice-instance
-ssh -o PubkeyAcceptedAlgorithms=+ssh-rsa cirros@<IP_FLOTTANTE>
-
-openstack volume create --size 1 volume1
-openstack server add volume selfservice-instance volume1
-```
-
----
-
-## 7. Le résultat dans Horizon
-
-Horizon est accessible sur http://192.168.56.11/horizon. Le bandeau « Canonical OpenStack »
-est le thème du paquet Ubuntu `openstack-dashboard`. La mention « Non sécurisé » du navigateur
-vient de l'absence de TLS, qui est une limite assumée du lab (§9).
-
-### 7.1 Connexion
-
-![Page de connexion d'Horizon](docs/captures/10-horizon-connexion.png)
-
-Le formulaire comporte trois champs : utilisateur, mot de passe et **Domaine**. Le champ
-Domaine apparaît parce que `OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True` (guide Horizon). On
-y saisit `Default`, qui correspond à `OPENSTACK_KEYSTONE_DEFAULT_DOMAIN`. L'authentification
-passe par `OPENSTACK_KEYSTONE_URL = http://controller:5000/v3` (écart au guide, §8).
-
-### 7.2 Vue de l'administrateur (`admin`, projet `admin`)
-
-![Admin – Résumé de l'utilisation](docs/captures/11-admin-resume-utilisation.png)
-
-**Admin → Vue d'ensemble** agrège tous les projets. On y voit le projet `myproject` avec
-1 vCPU, 1 Go de disque et 64 Mo de RAM : c'est exactement le gabarit `m1.nano` de l'instance
-CirrOS. Seul un compte admin a accès à ce panneau.
-
-![Admin – quotas du projet admin](docs/captures/12-admin-projet-admin-quotas.png)
-
-**Projet → Vue d'ensemble**, pour le projet `admin` lui-même. Les compteurs Instances,
-vCPUs, RAM, IP flottantes et Routeurs sont tous à **0**, parce que l'instance et le routeur
-ont été créés dans `myproject` en tant que `myuser`, comme le demande le guide. Le réseau
-utilisé (1 sur 100) est `provider`, créé par admin. La section « Volume » est vide : la capture
-date d'avant l'étape Cinder.
-
-![Admin – topologie vue depuis le projet admin](docs/captures/13-admin-topologie-projet-admin.png)
-
-Depuis le projet `admin`, la topologie ne montre que `provider` (192.168.57.0/24). Ce réseau
-a été créé par admin avec `--share --external`. Le réseau `selfservice`, le routeur et
-l'instance appartiennent à `myproject` et n'apparaissent pas dans ce projet.
-
-![Admin – instances du projet admin](docs/captures/14-admin-instances-projet-admin.png)
-
-Le filtre `selfservice-instance` ne renvoie « Aucun élément à afficher » : **Projet → Instances**
-ne liste que les instances du projet courant. Pour voir toutes les instances, un admin passe
-par **Admin → Compute → Instances**.
-
-![Admin – Accès API avant Cinder](docs/captures/15-admin-acces-api-avant-cinder.png)
-
-**Accès API** affiche le catalogue Keystone tel que l'utilisateur le voit. Avant l'étape
-Cinder, il contient **5 services** : Compute (8774/v2.1), Identity (5000/v3/), Image (9292),
-Network (9696) et Placement (8778). C'est la même chose que `openstack catalog list`.
-
-### 7.3 Vue de l'utilisateur de démonstration (`myuser`, projet `myproject`)
-
-![myuser – Accès API, catalogue complet](docs/captures/21-myuser-acces-api.png)
-
-Après l'étape Cinder, le catalogue compte **6 services** : **Block Storage**
-(`http://controller:8776/v3`) s'ajoute aux 5 précédents. Toutes les URL utilisent le nom
-`controller`, comme les endpoints créés par les rôles Ansible.
-
-![myuser – Instances (1 h 18 après le lancement)](docs/captures/16-myuser-instances.png)
-![myuser – Instances (5 h après le lancement)](docs/captures/22-myuser-instances-5h.png)
-
-L'instance `selfservice-instance` est **Active / En fonctionnement**, avec l'image `cirros`,
-le gabarit `m1.nano` et la paire de clés `mykey`. Elle a deux adresses : **172.16.1.153**
-(fixe, réseau `selfservice`) et **192.168.57.185** (IP flottante). Les deux captures sont
-prises à environ 4 h d'écart (âge de 1 h 18 puis de 5 h), et l'instance est restée stable
-entre les deux, pendant l'installation de Cinder.
-
-![myuser – Images](docs/captures/23-myuser-images.png)
-
-Il y a une seule image, `cirros` : **Actif**, visibilité **Publique** (`--public`, donc
-utilisable par tous les projets), format **QCOW2**, 12,13 Mo (CirrOS 0.4.0). Elle est stockée
-par Glance dans le backend `fs`, sous `/var/lib/glance/images/`.
-
-![myuser – Volumes](docs/captures/24-myuser-volumes.png)
-
-`volume1` fait **1 Gio**, il est **En cours d'utilisation** et **attaché sur /dev/vdb** à
-`selfservice-instance`. Son type est `__DEFAULT__`, le type de volume par défaut créé par
-Cinder, aucun type n'ayant été défini pendant le TP. C'est la vue Horizon des tests CIN-09 à
-CIN-11.
-
-![myuser – Topologie du réseau](docs/captures/25-myuser-topologie-finale.png)
-
-La topologie est celle de l'option 2 du guide : réseau `provider` (bleu, 192.168.57.0/24),
-**routeur** au milieu, réseau `selfservice` (orange, 172.16.1.0/24) et l'**instance**
-raccordée à `selfservice`. Le trafic de l'instance vers l'extérieur traverse le routeur :
-NAT et IP flottante sont gérés dans le namespace `qrouter` de l'agent L3 sur le controller.
-
-![myuser – Réseaux](docs/captures/26-myuser-reseaux.png)
-
-| Réseau | Sous-réseau | Partagé | Externe | Lecture |
-|---|---|---|---|---|
-| `provider` | 192.168.57.0/24 | Oui | Oui | réseau flat créé par admin (`--share --external`), visible de tous les projets, il porte les IP flottantes |
-| `selfservice` | 172.16.1.0/24 | Non | Non | réseau VXLAN privé du projet, seul `myproject` le voit |
-
-![myuser – Routeurs](docs/captures/27-myuser-routeurs.png)
-
-`router` est **Active**, avec `provider` comme **réseau externe** : c'est le résultat de
-`openstack router set router --external-gateway provider`. Le bouton « Supprimer la
-passerelle » retirerait cette passerelle externe et couperait l'accès aux IP flottantes.
-
-![myuser – Groupes de sécurité](docs/captures/28-myuser-groupes-securite.png)
-![myuser – Règles du groupe default](docs/captures/29-myuser-regles-groupe-default.png)
-
-Le projet n'a qu'un groupe, `default`, avec **6 règles** :
-
-| Règle | Origine |
-|---|---|
-| Sortie IPv4 et IPv6 vers tout | règles créées par Neutron avec le groupe `default` |
-| Entrée IPv4 et IPv6 depuis le groupe `default` | règles créées par Neutron : les membres du groupe communiquent entre eux |
-| Entrée **ICMP** depuis 0.0.0.0/0 | `openstack security group rule create --proto icmp default` (guide) |
-| Entrée **TCP 22 (SSH)** depuis 0.0.0.0/0 | `openstack security group rule create --proto tcp --dst-port 22 default` (guide) |
-
-Sans les deux dernières règles, les tests de ping et de SSH vers l'IP flottante échoueraient.
-Le filtrage est appliqué par l'agent OVS sur compute1 (`firewall_driver = openvswitch`).
-
-![myuser – IP flottantes](docs/captures/30-myuser-ip-flottantes.png)
-
-**192.168.57.185** est allouée dans le pool `provider`, mappée sur `selfservice-instance`
-172.16.1.153, avec le statut **Active**. Le DNAT/SNAT correspondant est réalisé par le routeur.
-
-![myuser – Synthèse des quotas](docs/captures/31-myuser-quotas.png)
-
-Synthèse des quotas par défaut du projet. Consommation observée :
-
-- **Compute** : 1 instance sur 10, 1 vCPU sur 20, 64 Mo de RAM sur 50 Go ;
-- **Volume** : 1 volume sur 10, 1 Go sur 1000 Go, 0 instantané ;
-- **Réseau** : 1 IP flottante sur 50, 1 groupe de sécurité sur 10, 6 règles sur 100 (les 6 règles
-  ci-dessus), 1 réseau sur 100 (`selfservice`, le seul qui appartient au projet), 3 ports sur
-  500, 1 routeur sur 10.
-
-![myuser – Résumé de l'utilisation](docs/captures/32-myuser-resume-utilisation.png)
-
-Le résumé d'utilisation sur la période du 2026-10-23 au 2026-10-24 donne 1 instance active,
-64 Mo de RAM active et environ 5,13 vCPU-heures. Ce chiffre est cohérent avec 1 vCPU allumé
-depuis environ 5 h. Le résumé peut être exporté en CSV.
-
-![myuser – Identité, projets](docs/captures/33-myuser-identite-projets.png)
-![myuser – Identité, utilisateurs](docs/captures/34-myuser-identite-utilisateurs.png)
-
-Pour `myuser`, qui n'est pas admin, **Identité → Projets** ne montre que `myproject`
-(description « Demo Project », domaine `Default`), et **Identité → Utilisateurs** ne montre
-que son propre compte. Les comptes de service (`glance`, `nova`, `neutron`, `cinder`…) et
-`admin` ne lui sont pas visibles. C'est le cloisonnement attendu d'un utilisateur qui n'a que
-les rôles `member` et `myrole` sur son projet.
-
----
-
-## 8. Écarts au guide et particularités constatées
-
-Chaque écart a été **constaté** sur le déploiement, pas supposé. Le test correspondant est
-référencé dans `tests-de-validation.md`.
-
-| Sujet | Guide | Ce dépôt | Raison |
-|---|---|---|---|
-| Dépôt Cloud Archive | `add-apt-repository cloud-archive:gazpacho` | `software-properties-common` passé en `state: latest` avant l'ajout | La version de la box (0.99.49.3) répondait `not a valid cloud-archive: 'gazpacho'`. Gazpacho est connu à partir de 0.99.49.4. |
-| `/etc/hosts` | le nom d'hôte doit résoudre vers l'IP de management | suppression des lignes `127.0.1.1` et `127.0.2.1`, provisioner rejoué à chaque `up` | Vagrant ajoute `127.0.2.1 <hostname>` : `controller` résolvait sur la boucle locale (RabbitMQ `rabbit@controller`, bind des services). |
-| memcached | remplacer `-l 127.0.0.1` par l'IP de management | suppression de **toutes** les autres lignes `-l` | `lineinfile` ne remplace que la dernière occurrence, donc memcached écoutait encore sur 127.0.0.1. |
-| RabbitMQ | création de l'utilisateur `openstack` | utilisateur `guest` supprimé en plus | Recommandation de la documentation RabbitMQ (Access Control). |
-| MariaDB | `mysql_secure_installation` (interactif) | équivalent non interactif via `ansible.mariadb` : comptes anonymes, `root@%` et base `test` supprimés ; root reste en `unix_socket` | Automatisation. La collection `community.mysql` signalait des dépréciations. |
-| Secure RBAC | le guide crée `myrole` pour `myuser` | rôle `member` ajouté à `myuser` sur `myproject` | `enforce_new_defaults` est actif par défaut : sans `member`, `openstack network create` renvoyait **403**. |
-| Mot de passe démo | – | `update_password: on_create`. Pour faire tourner le mot de passe : `-e demo_update_password=always` | Sinon la tâche était `changed` à chaque passage (non idempotente). |
-| Nova `[service_user] auth_url` | `https://controller/identity` | `http://controller:5000/` | Keystone écoute sur `:5000` sans préfixe `/identity` ni TLS dans ce déploiement (catalogue `http://controller:5000/v3/`). |
-| Horizon `OPENSTACK_KEYSTONE_URL` | exemple en `/identity` | `http://%s:5000/v3` | Même raison. Le guide demande d'inclure le port dans ce cas. |
-| API servies par Apache | `service nova-api restart` | les handlers redémarrent **apache2** | Paquets Ubuntu : nova-api (8774), nova-api-metadata (8775), neutron API (9696), placement (8778) et cinder-api (8776) sont servis par Apache mod_wsgi (constaté avec `ss -tlnp`). Aucun service systemd `nova-api` n'existe. |
-| nova-api-metadata | – | paquet `nova-api-metadata` installé sur le controller | Nécessaire pour que l'agent de métadonnées Neutron joigne le port 8775. |
-| Unités Neutron | `neutron-server` | unités découvertes avec `service_facts` : `neutron-rpc-server`, `neutron-periodic-workers` et les agents | Découpage des unités constaté dans le paquet Ubuntu 2026.1. |
-| Interface provider | « configurer l'interface sans IP » | template netplan `/etc/netplan/60-provider.yaml` (sans DHCP, sans RA, `optional: true`) + bridge OVS `br-provider` créé par `ovs-vsctl` | Persistance de la configuration après redémarrage. |
-| Accès SSH à CirrOS 0.4.0 | `ssh cirros@IP` | `ssh -o PubkeyAcceptedAlgorithms=+ssh-rsa cirros@IP` | OpenSSH ≥ 8.8 refuse les signatures `ssh-rsa` (SHA-1) que propose CirrOS 0.4.0, d'où la demande de mot de passe. Les métadonnées, elles, étaient correctes (haproxy 200 sur `public-keys`). |
-| Filtre LVM | `a/sdb/` (+ `a/sda/` si l'OS est sur LVM) | cas « OS sur LVM » appliqué sur block1 **et** compute1 | La box bento a l'OS sur LVM (`ubuntu-vg` sur `sda3`), et `use_devicesfile=0` (le filtre regex s'applique). |
-| tgt | créer `/etc/tgt/conf.d/cinder.conf` | créé seulement si aucune inclusion `/var/lib/cinder/volumes/` n'existe | Évite une double déclaration des cibles. Constaté : le paquet Ubuntu n'en fournit pas. |
-| VG `cinder-volumes` « plein » | – | normal : thin pool `cinder-volumes-pool` | `lvm_type` vaut `auto` par défaut (« Auto defaults to thin if thin is supported »), et `thin-provisioning-tools` est installé. `vgs` montre alors très peu de `VFree`. |
-| `boot_timeout = 600` | – | dans le Vagrantfile | Marge utile si l'hyperviseur Windows est actif (mode NEM, démarrages très lents). Sans effet quand il est désactivé. |
-| `box_architecture = "amd64"` | – | dans le Vagrantfile | La détection automatique ne trouvait pas la box amd64 ajoutée localement (« box doesn't support provider »). |
-
-Hors guide, non appliqué : la partie optionnelle de Glance sur les quotas par projet
-(*registered limits*, `use_keystone_limits`).
-
----
-
-## 9. Limites (laboratoire, pas production)
-
-Ce TP suit le guide d'installation, qui privilégie la simplicité :
-
-- **pas de TLS** : API, Horizon, RabbitMQ (5672), MariaDB et iSCSI circulent en clair sur le réseau de management ;
-- **RabbitMQ** écoute sur toutes les interfaces : la configuration par défaut n'est pas restreinte au management ;
-- **un seul controller**, sans haute disponibilité (MariaDB, RabbitMQ et les API sont des points de défaillance uniques) ;
-- **tgt** : la cible iSCSI montre une ACL `ALL`, avec un compte d'authentification généré par Cinder (`Account information`) ;
-- les secrets sont protégés par Ansible Vault, mais ils restent en clair dans les fichiers de configuration des services (0640, groupe du service), comme dans toute installation par paquets.
-
----
-
-## 10. Références officielles
-
-- Guide d'installation OpenStack (environnement, NTP, paquets, SQL, RabbitMQ, memcached, etcd) : https://docs.openstack.org/install-guide/
-- Ubuntu Cloud Archive : https://wiki.ubuntu.com/OpenStack/CloudArchive
-- Keystone 2026.1 : https://docs.openstack.org/keystone/2026.1/install/
-- Glance 2026.1 : https://docs.openstack.org/glance/2026.1/install/
-- Placement 2026.1 : https://docs.openstack.org/placement/2026.1/install/
-- Nova 2026.1 : https://docs.openstack.org/nova/2026.1/install/
-- Neutron 2026.1 : https://docs.openstack.org/neutron/2026.1/install/
-- Horizon 2026.1 : https://docs.openstack.org/horizon/2026.1/install/
-- Cinder 2026.1 (controller) : https://docs.openstack.org/cinder/2026.1/install/cinder-controller-install-ubuntu.html
-- Cinder 2026.1 (nœud de stockage) : https://docs.openstack.org/cinder/2026.1/install/cinder-storage-install-ubuntu.html
-- Cinder, pilote LVM (`lvm_type`) : https://docs.openstack.org/cinder/2026.1/configuration/block-storage/drivers/lvm-volume-driver.html
-- Lancer une instance : https://docs.openstack.org/install-guide/launch-instance.html
-- Vagrant, disques : https://developer.hashicorp.com/vagrant/docs/disks/usage
+**La véritable valeur de ce lab est de pouvoir expliquer comment le cloud fonctionne, comment il est construit et comment vérifier qu’il fonctionne correctement et de manière sécurisée.**
